@@ -1,0 +1,10 @@
+/*
+ * Website customization layer — design tokens only.
+ *
+ * Loaded after the template's globals.css, so anything here overrides the preset. Change tokens,
+ * not components: every component reads these variables. Brand colours set in the ERP (or in
+ * site.config.json `theme.colors`) still win over --brand / --brand-2 because they are set inline.
+ *
+ * Example:
+ *   :root { --radius: 1rem; --heading-weight: 700; }
+ */
