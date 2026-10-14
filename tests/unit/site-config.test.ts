@@ -53,7 +53,11 @@ describe("public site config (schema v2)", () => {
   });
 
   it("refuses development hosts in production, duplicate hosts, unknown keys and malformed hosts", () => {
-    expect(siteConfigSchema.safeParse({ ...template, deployment: { environment: "production" } }).success).toBe(false);
+    // Independent of the installation's own site.config.json (a staging or production branch has no
+    // development hosts): state them explicitly.
+    const withDevelopmentHosts = { ...template, domains: { ...template.domains, development: ["shop.localhost"] } };
+    expect(siteConfigSchema.safeParse({ ...withDevelopmentHosts, deployment: { environment: "production" } }).success).toBe(false);
+    expect(siteConfigSchema.safeParse({ ...withDevelopmentHosts, deployment: { environment: "staging" } }).success).toBe(true);
     expect(siteConfigSchema.safeParse({ ...siteB, domains: { primary: "a.example.com", aliases: ["a.example.com"] } }).success).toBe(false);
     expect(siteConfigSchema.safeParse({ ...template, extra: true }).success).toBe(false);
     expect(siteConfigSchema.safeParse({ ...template, website: { id: "12", slug: "x1" } }).success).toBe(false);
