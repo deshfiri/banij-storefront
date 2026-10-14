@@ -1,0 +1,11 @@
+# Never send credentials or local material into the image build context (not even an
+# intermediate layer): an installation's credentials live only in its server-side .env at runtime.
+.env
+.env.*
+!.env.example
+dev/tls/
+node_modules/
+.next/
+test-results/
+playwright-report/
+.git/

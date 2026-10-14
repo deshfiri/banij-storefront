@@ -6,14 +6,27 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run tests/unit",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit && eslint src && vitest run tests/unit",
+    "test:integration": "bash dev/integration.sh",
+    "test:e2e": "bash dev/e2e.sh",
+    "registry": "node scripts/registry.mjs",
+    "test:status": "bash dev/status-codes.sh",
+    "test:builds": "bash dev/independent-builds.sh",
+    "test:regression": "bash dev/regression.sh"
   },
   "dependencies": {
     "next": "16.4.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "redis": "^5.12.1",
+    "server-only": "^0.0.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
@@ -21,6 +34,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.4.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3.2.7"
   }
 }

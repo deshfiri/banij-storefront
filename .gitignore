@@ -39,3 +39,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# dev-only TLS material
+/dev/tls/
+
+# test output
+/test-results/
+/playwright-report/
+!.env.example
+
+# local development ERP state (seeded ids, dev accounts) — a record for this machine, not the project
+/dev/demo-data.json
