@@ -27,6 +27,8 @@ needed before the build that goes live:
 - `domains.primary` — the final host (e.g. `shop.example.com`); `domains.aliases` — other verified hosts;
   `domains.development` — `[]` in production.
 - `deployment.environment` — `"production"`.
+  With `NODE_ENV=production` the server ignores `domains.development` entirely: only the primary and
+  the aliases are served, every other host gets `404` (verified with a standalone build, §6 checks).
 - `STOREFRONT_IMAGE_ORIGIN` — the one public HTTPS origin and path the ERP serves product media from.
 
 Keep each installation's `site/site.config.json` (and `content.json`, `theme.css`) committed on its own
