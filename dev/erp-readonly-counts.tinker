@@ -1,0 +1,11 @@
+// DEVELOPMENT ONLY — read-only. Piped into `php artisan tinker` (so no opening PHP tag) from the
+// ERP directory by dev/preview-runtime-check.sh, to prove a preview run wrote nothing. No writes.
+$s = DB::selectOne('select current_schema() s');
+echo 'ERP_COUNTS=', json_encode([
+    'schema' => $s->s,
+    'storefront_write_requests' => DB::table('storefront_requests')->count(),
+    'orders' => DB::table('orders')->count(),
+    'stock_reservations' => DB::table('stock_reservations')->count(),
+    'website_credentials' => DB::table('website_credentials')->count(),
+    'website_domains' => DB::table('website_domains')->count(),
+]), PHP_EOL;
