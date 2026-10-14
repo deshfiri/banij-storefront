@@ -1,0 +1,46 @@
+# One Banij storefront installation (P3: one independently hosted storefront per Owner).
+#
+# Serves exactly this website's own names with automatic HTTPS. No on-demand TLS, no ERP block, no
+# provisioning listener. Values come from Caddy's environment (see deploy/installation/compose.yaml):
+#   SITE_PRIMARY_HOST   the primary host in site/site.config.json (e.g. shop.example.com)
+#   ACME_EMAIL          contact for the certificate authority
+#   STOREFRONT_UPSTREAM storefront address, e.g. storefront:3000 (compose) or 127.0.0.1:3000 (VPS)
+#
+# The storefront itself refuses any host its site.config.json does not declare (404) and redirects
+# ERP-registered aliases to the primary; Caddy only terminates TLS for the names listed here.
+
+{
+	email {$ACME_EMAIL}
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}
+
+{$SITE_PRIMARY_HOST} {
+	import security_headers
+	encode zstd gzip
+
+	# Internal routes are never served on a public name.
+	@internal path /api/internal/*
+	respond @internal 404
+
+	reverse_proxy {$STOREFRONT_UPSTREAM} {
+		# Host is passed through unchanged: the storefront checks it against its own config.
+		header_up X-Forwarded-Proto https
+		health_uri /api/health
+		health_interval 30s
+	}
+}
+
+# Aliases (only names that are ALSO verified and active for this website in the Banij ERP).
+# Uncomment and list them; each is redirected to the primary.
+# www.shop.example.com {
+# 	import security_headers
+# 	redir https://{$SITE_PRIMARY_HOST}{uri} 308
+# }

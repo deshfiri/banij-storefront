@@ -1,0 +1,83 @@
+# LEGACY — SUPERSEDED BY P3 (2026-10-13). Not used by storefront installations; kept only until the
+# approved legacy cleanup. Each installation uses deploy/installation/Caddyfile instead. The ERP's
+# own php_fastcgi guidance below remains relevant to the ERP session.
+#
+# Banij production edge (D30 §4). One Caddy in front of the ERP and the shared storefront.
+# Placeholders in {$VARS} come from Caddy's environment; nothing secret is written in this file.
+#
+# Verified ERP behaviour this relies on (Laravel 13, no trustProxies configured):
+#   - X-Forwarded-* from Caddy is IGNORED by the ERP. Serving the ERP through `reverse_proxy` over
+#     plain HTTP makes every Storefront API call fail with 400 https_required.
+#   - `php_fastcgi` passes HTTPS=on for TLS connections, so isSecure() is true and REMOTE_ADDR is the
+#     real client (rate limits and the TLS-ask IP allow-list see real addresses). Use php_fastcgi.
+
+{
+	email {$ACME_EMAIL}
+
+	# Certificates for partner domains are issued on first request — only if the ERP says yes.
+	# The ERP answers 200 only for a website subdomain or an ACTIVE custom domain of a website that is
+	# not closed (ResolveWebsiteHost); 403 otherwise; 404 for a missing/wrong token or a disallowed IP.
+	on_demand_tls {
+		ask https://{$ERP_HOST}/api/internal/tls/authorize?token={$STOREFRONT_TLS_ASK_TOKEN}
+	}
+	# Caddy is the edge: no trusted_proxies are configured, so it records the real client address.
+}
+
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+}
+
+# --- ERP (admin, Storefront API, payment returns and IPN, TLS ask) ---------------------------------
+{$ERP_HOST} {
+	import security_headers
+	root * /srv/feriwala/public
+	encode zstd gzip
+	php_fastcgi {$ERP_FPM_UPSTREAM}
+	file_server
+}
+
+# --- Storefront provisioning (internal only; docs/provisioning-protocol.md) ------------------------
+{$STOREFRONT_PROVISIONING_HOST} {
+	tls internal
+	@outsider not remote_ip {$ERP_EGRESS_CIDRS}
+	respond @outsider 404
+	@other not path /api/internal/registry
+	respond @other 404
+	request_body {
+		max_size 16KB
+	}
+	reverse_proxy {$STOREFRONT_UPSTREAM} {
+		header_up X-Forwarded-Proto https
+	}
+}
+
+# --- Every partner website: {subdomain}.{storefront domain} and active custom domains ---------------
+https:// {
+	tls {
+		on_demand
+	}
+	import security_headers
+
+	# The internal provisioning route is never served on a public name.
+	@internal path /api/internal/*
+	respond @internal 404
+
+	encode zstd gzip
+	# Host is passed through unchanged; the storefront resolves the website from it alone and ignores
+	# X-Forwarded-Host.
+	reverse_proxy {$STOREFRONT_UPSTREAM} {
+		header_up X-Forwarded-Proto https
+		health_uri /api/health
+		lb_try_duration 5s
+	}
+}
+
+# Plain HTTP only redirects (ACME HTTP-01 is handled by Caddy before this).
+http:// {
+	redir https://{host}{uri} 308
+}

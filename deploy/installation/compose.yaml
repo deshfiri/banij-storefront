@@ -1,0 +1,66 @@
+# One Banij storefront installation: the storefront, its own Redis, and Caddy for its own domain.
+# No ERP services here — the storefront reaches the central Banij ERP over HTTPS (BANIJ_ERP_BASE_URL).
+#
+#   1. Fill site/site.config.json (public configuration) and build the image:
+#        docker build -f deploy/Dockerfile -t banij-storefront-<slug>:<version> .
+#   2. Create ./.env next to this file from .env.example, by hand, chmod 600 (never committed).
+#   3. docker compose -f deploy/installation/compose.yaml --env-file deploy/installation/caddy.env up -d
+#
+# See docs/installation.md for the full operator procedure.
+
+services:
+  storefront:
+    image: ${STOREFRONT_IMAGE:?set STOREFRONT_IMAGE, e.g. banij-storefront-karimtraders:0.2.0}
+    restart: unless-stopped
+    # Credentials and ERP endpoint: server-side only, from the installation's own .env.
+    env_file: ../../.env
+    environment:
+      NODE_ENV: production
+      STOREFRONT_REDIS_URL: redis://storefront:${STOREFRONT_REDIS_PASSWORD:?}@redis:6379/0
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [internal]
+    depends_on: [redis]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ../redis-storefront.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./redis.acl:/run/secrets/redis-storefront.acl:ro
+      - redis-data:/data
+    networks: [internal]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      SITE_PRIMARY_HOST: ${SITE_PRIMARY_HOST:?}
+      ACME_EMAIL: ${ACME_EMAIL:?}
+      STOREFRONT_UPSTREAM: storefront:3000
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [internal, public]
+    depends_on: [storefront]
+
+networks:
+  internal:
+    internal: true
+  public: {}
+
+volumes:
+  redis-data: {}
+  caddy-data: {}
+  caddy-config: {}
