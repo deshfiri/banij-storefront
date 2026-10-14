@@ -111,9 +111,9 @@ Run from a clean checkout of the reviewed commit on the build machine.
    The storefront **refuses to start** (and names the variable, never its value) on a bad `.env`,
    shared mode, a local or mismatched image origin, or an invalid site config. Fix and restart.
 
-Node.js option (no containers): `npm ci && npm run build` with the same `.env` present (the build
-reads `STOREFRONT_IMAGE_ORIGIN` from it), then `NODE_ENV=production npm start` behind Caddy with
-`STOREFRONT_UPSTREAM=127.0.0.1:3000`, under a process supervisor (systemd) that restarts on failure.
+Node.js option (no containers): follow [vps-runbook.md](vps-runbook.md) — Ubuntu, Node.js 24, local
+Redis, the standalone server under systemd (`deploy/vps/banij-storefront.service`), Nginx
+(`deploy/vps/nginx-banij-storefront.conf`) and Certbot, with release directories for updates and rollback.
 
 ---
 

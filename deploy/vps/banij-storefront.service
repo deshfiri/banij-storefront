@@ -1,0 +1,52 @@
+# systemd unit for ONE Banij storefront installation on an Ubuntu VPS (see docs/vps-runbook.md).
+#
+#   sudo install -m 0644 deploy/vps/banij-storefront.service /etc/systemd/system/banij-storefront.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now banij-storefront
+#
+# Layout (APP=/var/www/banij-storefront):
+#   $APP/releases/<commit>/   one built release each (Next.js standalone output)
+#   $APP/current              symlink to the live release — switching it is the deploy and the rollback
+#   $APP/shared/.env          server-side environment, 0600, owner banij — never in git, never in a release
+#
+# The server listens on 127.0.0.1 only; Nginx is the public face. It refuses to start (and names the
+# variable, never its value) when the environment or site configuration is wrong.
+
+[Unit]
+Description=Banij storefront (Next.js)
+After=network-online.target redis-server.service
+Wants=network-online.target
+# A configuration error is not fixed by restarting: stop after a few quick failures.
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=banij
+Group=banij
+WorkingDirectory=/var/www/banij-storefront/current/.next/standalone
+EnvironmentFile=/var/www/banij-storefront/shared/.env
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=127.0.0.1
+Environment=NEXT_TELEMETRY_DISABLED=1
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+
+# Hardening: read-only system, no home access, private /tmp. The image optimizer writes its cache under
+# the release's .next/cache, so the releases directory stays writable for this user only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/www/banij-storefront/releases
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
