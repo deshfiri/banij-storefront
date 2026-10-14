@@ -3,12 +3,12 @@
   "template": { "name": "banij-storefront", "version": "0.2.0" },
   "website": { "id": "01M4MHJ7BA282X3QXV1Q256ZMP", "slug": "karimtraders" },
   "domains": {
-    "primary": "karimtraders.feriwala.shop",
+    "primary": "staging.deshfiri.com",
     "aliases": [],
-    "development": ["karimtraders.localhost"]
+    "development": []
   },
   "theme": { "colors": {} },
   "locale": {},
   "features": {},
-  "deployment": { "environment": "development" }
+  "deployment": { "environment": "staging" }
 }
