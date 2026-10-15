@@ -50,7 +50,14 @@ need_root() { [ "$(id -u)" -eq 0 ] || die "run as root: sudo bash $0 $*"; }
 listening() { ss -ltnH "sport = :$1" | grep -q .; }
 as_banij() { runuser -u banij -- env HOME="$HOMEDIR" PATH="$NODE_BIN:/usr/local/bin:/usr/bin:/bin" "$@"; }
 env_value() { sed -n "s/^$1=//p" "$SHARED/.env" | tail -1; }   # used internally only, never echoed
-latest_backup() { { ls -1d "$BACKUPS"/*/ 2>/dev/null || true; } | sort | tail -1; }
+# Newest COMPLETE vhost backup (plain timestamp directory); never an old-webroot, contain or partial one.
+latest_backup() {
+  local d
+  for d in $({ ls -1d "$BACKUPS"/[0-9]*-[0-9]* 2>/dev/null || true; } | sort -r); do
+    [[ "$(basename "$d")" =~ ^[0-9]{8}-[0-9]{6}$ ]] && [ -f "$d/COMPLETE" ] && [ -f "$d/vhost.conf" ] && { echo "$d"; return 0; }
+  done
+  return 0
+}
 
 redis_bin() {
   local bin
@@ -139,7 +146,7 @@ verify() {
   fi
   unset secret pass
   local bk; bk=$(latest_backup)
-  if [ -n "$bk" ] && [ -f "$bk/webroot.sha256" ]; then t "web root unchanged" "(cd '$WEBROOT' && sha256sum --quiet -c '$bk/webroot.sha256')"; fi
+  if [ -n "$bk" ] && [ -s "$bk/webroot.sha256" ]; then t "aaPanel placeholder files unchanged" "sha256sum --quiet -c '$bk/webroot.sha256'"; fi
   t "shared redis untouched (still active)" "systemctl is-active --quiet redis"
   t "nginx -t" "'$NGINX' -t >/dev/null 2>&1"
   [ $fail -eq 0 ] || die "verification failed"
@@ -219,24 +226,31 @@ old_inspect() {
 
 old_backup() {
   need_root old-backup
+  [ -d "$WEBROOT" ] || die "no $WEBROOT"
   local bk; bk=$BACKUPS/$(date +%Y%m%d-%H%M%S)-old-webroot
-  install -d -m 0700 "$bk"
-  echo "== archiving $WEBROOT (all files, hidden ones included) into $bk"
-  (cd "$WEBROOT" && find . -mindepth 1 -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$bk/files.sha256"
-  (cd "$WEBROOT" && find . -mindepth 1 -printf '%M %u:%g %s %p\n' | sort -k4) > "$bk/listing.txt"
-  tar --xattrs --acls -C "$WEBROOT" -cpzf "$bk/old-webroot.tgz" .
-  chmod 0600 "$bk"/*
+  PARTIAL=$bk.partial; local tmp=$PARTIAL
+  # Built in $tmp; renamed to $bk (and marked VERIFIED) only after the test restore matches. Any failure
+  # removes it, so old-quarantine can never act on an unverified archive.
+  trap '[ -z "${PARTIAL:-}" ] || [ ! -e "$PARTIAL" ] || { rm -rf "$PARTIAL"; echo "ERROR: old-backup failed — partial archive removed, web root untouched" >&2; }' EXIT
+  install -d -m 0700 "$tmp"
+  echo "== archiving $WEBROOT (all files, hidden ones included)"
+  find "$WEBROOT" -mindepth 1 -type f -printf '%P\0' | sort -z | (cd "$WEBROOT" && xargs -0 -r sha256sum --) > "$tmp/files.sha256"
+  find "$WEBROOT" -mindepth 1 -printf '%M %u:%g %s %P\n' | sort -k4 > "$tmp/listing.txt"
+  tar --xattrs --acls -C "$WEBROOT" -cpzf "$tmp/old-webroot.tgz" .
+  chmod 0600 "$tmp"/*
   echo "== verifying"
-  gzip -t "$bk/old-webroot.tgz" || die "archive is corrupt"
+  gzip -t "$tmp/old-webroot.tgz" || die "archive is corrupt"
   local want got
-  want=$(wc -l < "$bk/listing.txt"); got=$(tar -tzf "$bk/old-webroot.tgz" | grep -vx './' | wc -l)
+  want=$(wc -l < "$tmp/listing.txt"); got=$(tar -tzf "$tmp/old-webroot.tgz" | grep -vx './' | wc -l)
   [ "$want" = "$got" ] || die "archive holds $got entries, the web root has $want"
-  install -d -m 0700 "$bk/verify-extract"
-  tar --xattrs --acls -C "$bk/verify-extract" -xpzf "$bk/old-webroot.tgz"
-  (cd "$bk/verify-extract" && sha256sum --quiet -c "$bk/files.sha256") || die "restored files do not match the originals"
-  rm -rf "$bk/verify-extract"
-  sha256sum "$bk/old-webroot.tgz" > "$bk/archive.sha256"
-  date -Is > "$bk/VERIFIED"; chmod 0600 "$bk"/*
+  install -d -m 0700 "$tmp/verify-extract"
+  tar --xattrs --acls -C "$tmp/verify-extract" -xpzf "$tmp/old-webroot.tgz"
+  (cd "$tmp/verify-extract" && sha256sum --quiet --strict -c "$tmp/files.sha256") || die "restored files do not match the originals"
+  rm -rf "$tmp/verify-extract"
+  (cd "$tmp" && sha256sum old-webroot.tgz) > "$tmp/archive.sha256"
+  date -Is > "$tmp/VERIFIED"; chmod 0600 "$tmp"/*
+  mv "$tmp" "$bk"
+  trap - EXIT
   ok "backup verified: $want entries, every file's checksum matches after a test restore"
   echo "   $bk  ($(du -sh "$bk/old-webroot.tgz" | cut -f1))"
 }
@@ -273,16 +287,34 @@ old_restore() {
 backup() {
   need_root backup
   local bk; bk=$BACKUPS/$(date +%Y%m%d-%H%M%S)
-  install -d -m 0700 "$bk"
-  cp -a "$VHOST" "$bk/vhost.conf"
+  PARTIAL=$bk.partial; local tmp=$PARTIAL
+  # Built in $tmp and renamed only when complete: a failed run never leaves a backup that looks valid.
+  # (The EXIT trap runs after this function returns, so it uses the script-level PARTIAL.)
+  trap '[ -z "${PARTIAL:-}" ] || [ ! -e "$PARTIAL" ] || { rm -rf "$PARTIAL"; echo "ERROR: backup failed — partial copy removed" >&2; }' EXIT
+  install -d -m 0700 "$tmp"
+  [ -f "$VHOST" ] || die "no vhost at $VHOST"
+  cp -a "$VHOST" "$tmp/vhost.conf"
+  local d
   for d in well-known proxy/$SITE extension/$SITE; do
-    [ -e "/www/server/panel/vhost/nginx/$d" ] && cp -a "/www/server/panel/vhost/nginx/$d" "$bk/$(tr / _ <<<"$d")"
+    if [ -e "/www/server/panel/vhost/nginx/$d" ]; then cp -a "/www/server/panel/vhost/nginx/$d" "$tmp/$(tr / _ <<<"$d")"; fi
   done
-  [ -e "/www/server/panel/vhost/rewrite/$SITE.conf" ] && cp -a "/www/server/panel/vhost/rewrite/$SITE.conf" "$bk/rewrite.conf"
-  (cd "$WEBROOT" && sha256sum .htaccess .user.ini 404.html 502.html index.html) > "$bk/webroot.sha256"
-  ss -ltn > "$bk/ports.txt"
-  systemctl list-units --type=service --state=running --no-legend --no-pager > "$bk/services.txt"
+  if [ -e "/www/server/panel/vhost/rewrite/$SITE.conf" ]; then cp -a "/www/server/panel/vhost/rewrite/$SITE.conf" "$tmp/rewrite.conf"; fi
+  # aaPanel placeholder files: checksum the ones that exist (absolute paths), record the missing ones.
+  : > "$tmp/webroot.sha256"; : > "$tmp/webroot-missing.txt"
+  local f
+  for f in .htaccess .user.ini 404.html 502.html index.html; do
+    if [ -f "$WEBROOT/$f" ]; then sha256sum "$WEBROOT/$f" >> "$tmp/webroot.sha256"; else echo "$f" >> "$tmp/webroot-missing.txt"; fi
+  done
+  ss -ltn > "$tmp/ports.txt"
+  systemctl list-units --type=service --state=running --no-legend --no-pager > "$tmp/services.txt"
+  cmp -s "$VHOST" "$tmp/vhost.conf" || die "vhost copy does not match the original"
+  date -Is > "$tmp/COMPLETE"
+  chmod 0600 "$tmp"/* 2>/dev/null || true
+  mv "$tmp" "$bk"
+  trap - EXIT
   ok "backup in $bk"
+  [ -s "$bk/webroot-missing.txt" ] && note "aaPanel placeholder files already absent from the web root: $(tr '\n' ' ' < "$bk/webroot-missing.txt")"
+  return 0
 }
 
 user() {
