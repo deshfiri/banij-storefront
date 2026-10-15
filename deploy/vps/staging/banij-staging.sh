@@ -3,8 +3,10 @@
 #
 #   sudo bash banij-staging.sh <phase>          one phase at a time, each only after approval
 #
-# Read-only phases:  preflight  env-check  verify  nginx-check
+# Read-only phases:  preflight  old-inspect  env-check  verify  nginx-check  exposure-check
 # Write phases:      backup  user  redis  deploykey  env-init  build  activate  nginx-include
+# Old deployment:    old-backup (verified archive)  old-quarantine (move out of the web root)
+#                    old-restore <backup dir>  — nothing is deleted by this script
 # Rollback:          rollback <service|release|redis|nginx|all> [--purge]
 #
 # Everything lives under /www/server/banij-storefront-staging (outside the web root). The only files
@@ -36,6 +38,8 @@ VHOST=/www/server/panel/vhost/nginx/$SITE.conf
 WEBROOT=/www/wwwroot/$SITE
 NGINX=/www/server/nginx/sbin/nginx
 NGINX_RELOAD=(/etc/init.d/nginx reload)
+# aaPanel-managed entries of the site's web root: never moved, never changed.
+KEEP=(.user.ini .htaccess .well-known 404.html 502.html index.html)
 # GitHub's published SSH host key (https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
 GITHUB_HOSTKEY='github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl'
 
@@ -159,6 +163,109 @@ nginx_check() {
   grep -nE 'proxy_cache +[a-z]|proxy_intercept_errors +on' <<<"$all" && note "caching / error interception is on — turn it off for this site" || ok "no proxy cache / error interception"
   note "$(grep -cE 'location +~' "$VHOST" || true) regex location(s) in the vhost (harmless only behind 'location ^~ /')"
   "$NGINX" -t
+}
+
+exposure_check() {
+  # Status codes only; bodies are discarded. Run before and after the reverse proxy.
+  local fail=0 code
+  for scheme in http https; do
+    for p in /package.json /package-lock.json /next.config.ts /.next/BUILD_ID /.next/required-server-files.json \
+             /node_modules/next/package.json /.env /.env.production /.git/HEAD /.git/config /src/ /site/site.config.json; do
+      code=$(curl -s -k -m 10 -o /dev/null -w '%{http_code}' "$scheme://$SITE$p" || true)
+      case "$code" in 200|206|301|302) echo "EXPOSED $scheme $p -> $code"; fail=1 ;; *) echo "ok      $scheme $p -> $code" ;; esac
+    done
+  done
+  [ $fail -eq 0 ] && ok "no project file is reachable over HTTP(S)" || echo "FAIL project files are reachable — see EXPOSED lines"
+  return $fail
+}
+
+# ---- old deployment in the web root ---------------------------------------------------------------
+
+is_kept() { local n=$1 k; for k in "${KEEP[@]}"; do [ "$n" = "$k" ] && return 0; done; return 1; }
+old_entries() { find "$WEBROOT" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | while read -r n; do is_kept "$n" || echo "$n"; done; }
+procs_in() {
+  local p cwd
+  for p in /proc/[0-9]*; do
+    cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
+    case "$cwd" in "$1"|"$1"/*) echo "${p#/proc/}" ;; esac
+  done
+}
+mask() { sed -E 's#(://)[^/@[:space:]]+@#\1***@#g; s#(gh[pousr]_|github_pat_)[A-Za-z0-9_]+#\1***#g'; }
+
+old_inspect() {
+  need_root old-inspect
+  echo "== web root entries (KEEP = aaPanel-managed, OLD = would be quarantined)"
+  find "$WEBROOT" -mindepth 1 -maxdepth 1 -printf '%f\t%M %u:%g %TY-%Tm-%Td %TH:%TM\n' | sort | while IFS=$'\t' read -r n meta; do
+    is_kept "$n" && printf 'KEEP  %-22s %s\n' "$n" "$meta" || printf 'OLD   %-22s %s\n' "$n" "$meta"
+  done
+  echo "== git of the old project (credentials in URLs masked)"
+  if [ -d "$WEBROOT/.git" ]; then
+    local G=(git -c safe.directory="$WEBROOT" -C "$WEBROOT")
+    { "${G[@]}" remote -v 2>&1 || true; } | mask
+    echo "branch: $("${G[@]}" branch --show-current 2>&1 || true)   HEAD: $({ "${G[@]}" log -1 --format='%H %ad %s' --date=short 2>&1 || true; } | mask)"
+    echo "uncommitted files: $({ "${G[@]}" status --porcelain 2>/dev/null || true; } | wc -l)"
+  else note "no .git"; fi
+  echo "== env files (names only)"
+  for f in "$WEBROOT"/.env*; do [ -f "$f" ] && { echo "$(basename "$f") ($(stat -c '%U %a' "$f")): $(grep -vE '^\s*(#|$)' "$f" | cut -d= -f1 | tr '\n' ' ')"; }; done
+  echo "== processes running from it"
+  local pids; pids=$(procs_in "$WEBROOT")
+  if [ -n "$pids" ]; then for p in $pids; do echo "PID $p user=$(stat -c %U /proc/$p) cmd=$(tr '\0' ' ' < /proc/$p/cmdline | cut -c1-100 | mask)"; done
+  else ok "no process has its working directory there"; fi
+  echo "== references in service managers / other vhosts"
+  grep -rlF "$WEBROOT" /etc/systemd/system /etc/supervisor /www/server/nodejs/vhost /www/server/panel/vhost/nginx 2>/dev/null \
+    | grep -vx "$VHOST" || ok "none besides the site's own vhost"
+  echo "== size: $(du -sh "$WEBROOT" 2>/dev/null | cut -f1)   free on /: $(df -h / | awk 'NR==2{print $4}')"
+}
+
+old_backup() {
+  need_root old-backup
+  local bk; bk=$BACKUPS/$(date +%Y%m%d-%H%M%S)-old-webroot
+  install -d -m 0700 "$bk"
+  echo "== archiving $WEBROOT (all files, hidden ones included) into $bk"
+  (cd "$WEBROOT" && find . -mindepth 1 -type f -print0 | sort -z | xargs -0 -r sha256sum) > "$bk/files.sha256"
+  (cd "$WEBROOT" && find . -mindepth 1 -printf '%M %u:%g %s %p\n' | sort -k4) > "$bk/listing.txt"
+  tar --xattrs --acls -C "$WEBROOT" -cpzf "$bk/old-webroot.tgz" .
+  chmod 0600 "$bk"/*
+  echo "== verifying"
+  gzip -t "$bk/old-webroot.tgz" || die "archive is corrupt"
+  local want got
+  want=$(wc -l < "$bk/listing.txt"); got=$(tar -tzf "$bk/old-webroot.tgz" | grep -vx './' | wc -l)
+  [ "$want" = "$got" ] || die "archive holds $got entries, the web root has $want"
+  install -d -m 0700 "$bk/verify-extract"
+  tar --xattrs --acls -C "$bk/verify-extract" -xpzf "$bk/old-webroot.tgz"
+  (cd "$bk/verify-extract" && sha256sum --quiet -c "$bk/files.sha256") || die "restored files do not match the originals"
+  rm -rf "$bk/verify-extract"
+  sha256sum "$bk/old-webroot.tgz" > "$bk/archive.sha256"
+  date -Is > "$bk/VERIFIED"; chmod 0600 "$bk"/*
+  ok "backup verified: $want entries, every file's checksum matches after a test restore"
+  echo "   $bk  ($(du -sh "$bk/old-webroot.tgz" | cut -f1))"
+}
+
+old_quarantine() {
+  need_root old-quarantine
+  local bk; bk=$({ ls -1d "$BACKUPS"/*-old-webroot 2>/dev/null || true; } | sort | tail -1)
+  [ -n "$bk" ] && [ -f "$bk/VERIFIED" ] || die "no verified old-backup — run old-backup first"
+  [ -z "$(procs_in "$WEBROOT")" ] || die "a process still runs from $WEBROOT — stop it first (see old-inspect)"
+  local entries; entries=$(old_entries)
+  [ -n "$entries" ] || { ok "nothing to move: only aaPanel entries remain"; return 0; }
+  install -d -m 0700 "$bk/quarantine"
+  echo "== moving out of the web root (aaPanel entries stay: ${KEEP[*]})"
+  while read -r n; do
+    [ -e "$bk/quarantine/$n" ] && die "$bk/quarantine/$n already exists"
+    mv -- "$WEBROOT/$n" "$bk/quarantine/$n" && echo "moved  $n"
+  done <<<"$entries"
+  echo "== web root now:"; ls -la "$WEBROOT"
+  ok "old deployment moved to $bk/quarantine (restore with: old-restore $bk)"
+}
+
+old_restore() {
+  need_root old-restore
+  local bk=${1:-}; [ -d "$bk/quarantine" ] || die "usage: old-restore $BACKUPS/<ts>-old-webroot"
+  local n names
+  names=$(find "$bk/quarantine" -mindepth 1 -maxdepth 1 -printf '%f\n')
+  while read -r n; do [ -z "$n" ] || [ ! -e "$WEBROOT/$n" ] || die "$WEBROOT/$n exists — not overwriting"; done <<<"$names"
+  while read -r n; do [ -z "$n" ] || { mv -- "$bk/quarantine/$n" "$WEBROOT/$n" && echo "restored $n"; }; done <<<"$names"
+  rmdir "$bk/quarantine"; ok "old deployment restored into $WEBROOT"
 }
 
 # ---- write phases --------------------------------------------------------------------------------
@@ -438,6 +545,11 @@ case "${1:-}" in
   build) build ;;
   activate) activate "${2:-}" ;;
   nginx-include) nginx_include ;;
+  exposure-check) exposure_check ;;
+  old-inspect) old_inspect ;;
+  old-backup) old_backup ;;
+  old-quarantine) old_quarantine ;;
+  old-restore) old_restore "${2:-}" ;;
   rollback) rollback "${2:-}" "${3:-}" ;;
-  *) sed -n '2,16p' "$0"; exit 1 ;;
+  *) sed -n '2,18p' "$0"; exit 1 ;;
 esac
